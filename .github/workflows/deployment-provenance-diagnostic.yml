@@ -1,0 +1,26 @@
+name: Verify deployment provenance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+  actions: write
+  checks: read
+  deployments: read
+
+jobs:
+  detect:
+    if: ${{ false }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - run: exit 1
+  probe:
+    needs: detect
+    if: ${{ !cancelled() && needs.detect.result == 'skipped' }}
+    uses: ./.github/workflows/deployment-provenance-probe.yml
+    with:
+      environment: provenance-review
