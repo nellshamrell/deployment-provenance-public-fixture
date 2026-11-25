@@ -1,0 +1,65 @@
+name: Read synthetic delete evidence without personal credentials
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  deployments: read
+  contents: read
+
+jobs:
+  read:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify the fixture records and artifact bytes with the job token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = nellshamrell/deployment-provenance-public-fixture
+          base="repos/$GITHUB_REPOSITORY"
+          work="$(mktemp -d "$RUNNER_TEMP/fixture-evidence.XXXXXX")"
+
+          check_case() {
+            local run="$1" env="$2" mode="$3" id status result
+            gh api "$base/actions/runs/$run" |
+              jq -e 'select(.status == "completed" and .conclusion == "failure" and .run_attempt == 1
+                and .path == ".github/workflows/delete-application.yml")' >/dev/null
+            id="$(gh api --method GET "$base/deployments" -f environment="$env" -F per_page=10 |
+              jq -er --arg env "$env" '.[0] | select(.environment == $env) | .id')"
+            status="$(gh api "$base/deployments/$id/statuses?per_page=1")"
+            jq -e --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run" '
+              .[0] | select(.state == "failure" and (.log_url == $url or (.log_url | startswith($url + "/job/"))))
+            ' <<<"$status" >/dev/null
+            gh api "$base/actions/runs/$run/artifacts?per_page=10" |
+              jq -e --arg mode "$mode" --argjson run "$run" '
+                if $mode == "missing" then .total_count == 0
+                else .total_count == 1 and (.artifacts[0] | .name == "rad-delete-result" and
+                  .expired == false and .workflow_run.id == $run) end
+              ' >/dev/null
+            if [[ "$mode" != missing ]]; then
+              mkdir "$work/$run"
+              gh run download "$run" --repo "$GITHUB_REPOSITORY" --name rad-delete-result --dir "$work/$run"
+              result="$work/$run/rad-delete-result.json"
+              jq -e --arg mode "$mode" '
+                .schemaVersion == "1.0" and .outcome == "failed" and .exitCode == 1
+                and .resourceType == "application" and .name == "fixture-app" and .forced == false
+                and (.output == (if $mode == "conflict" then
+                  "Synthetic 409 Conflict: The target resource is in progress state: Updating"
+                else "Synthetic unrelated failure" end))
+              ' "$result" >/dev/null
+            fi
+            printf 'Verified %s: run %s, deployment %s.\n' "$mode" "$run" "$id"
+          }
+
+          check_case 45518992350 force-review-v2-conflict conflict
+          check_case 45519149029 force-review-missing missing
+          check_case 45519253066 force-review-nonconflict nonconflict
+
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/$base/environments/force-review-v2-conflict/variables")"
+          printf 'Fixture environment variables read with Actions job token: HTTP %s\n' "$status"
+          case "$status" in 200|403|404) ;; *) exit 1 ;; esac
