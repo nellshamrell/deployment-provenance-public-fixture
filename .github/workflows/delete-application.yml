@@ -1,0 +1,59 @@
+name: Synthetic Radius delete failure
+run-name: Radius - Delete ${{ inputs.environment }} [radius:v1 app=${{ inputs.application }}] ${{ inputs.correlation_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Synthetic environment and evidence case
+        type: choice
+        required: true
+        options:
+          - force-review-conflict
+          - force-review-missing
+          - force-review-nonconflict
+          - force-app-conflict
+          - force-app-missing
+          - force-app-nonconflict
+      application:
+        description: Synthetic application (fixture-app)
+        type: string
+        required: true
+      correlation_id:
+        description: Synthetic run correlation
+        type: string
+      force:
+        description: Must be false; this fixture never retries
+        type: boolean
+        default: false
+      approved_deployment_id:
+        description: Unused fixture input
+        type: string
+      approved_run_id:
+        description: Unused fixture input
+        type: string
+      approved_provider:
+        description: Unused fixture input
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+  actions: write
+  checks: read
+  deployments: read
+
+jobs:
+  detect:
+    if: ${{ false }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - run: exit 1
+  fixture:
+    needs: detect
+    if: ${{ !cancelled() && needs.detect.result == 'skipped' && !inputs.force && inputs.application == 'fixture-app' }}
+    uses: ./.github/workflows/synthetic-delete-failure.yml
+    with:
+      environment: ${{ inputs.environment }}

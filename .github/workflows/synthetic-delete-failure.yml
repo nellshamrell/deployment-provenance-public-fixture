@@ -1,0 +1,86 @@
+name: Synthetic protected failure
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+  actions: write
+  checks: read
+  deployments: read
+
+concurrency:
+  group: radius-routes-gateway-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  failure:
+    name: Generate synthetic failure evidence
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Verify the running job owns the latest deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_ENV: ${{ inputs.environment }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          base="repos/$GITHUB_REPOSITORY"
+          run="$(gh api "$base/actions/runs/$GITHUB_RUN_ID")"
+          run_node="$(jq -er --arg repo "$GITHUB_REPOSITORY" --argjson run_id "$GITHUB_RUN_ID" '
+            select(.id == $run_id and .repository.full_name == $repo and .event == "workflow_dispatch"
+              and .run_attempt == 1 and .path == ".github/workflows/delete-application.yml") | .node_id
+          ' <<<"$run")"
+          jobs="$(gh api "$base/actions/runs/$GITHUB_RUN_ID/attempts/1/jobs?per_page=30")"
+          ids="$(jq -ce 'select(.total_count == (.jobs | length) and .total_count > 0 and .total_count <= 30)
+            | [.jobs[].node_id] | select(all(.[]; type == "string" and length > 0) and length == (unique | length))' <<<"$jobs")"
+          probe_node="$(jq -er '[.jobs[] | select(.status == "in_progress" and
+            (.name | endswith("Generate synthetic failure evidence")))] | select(length == 1) | .[0].node_id' <<<"$jobs")"
+          query='query($ids: [ID!]!) { nodes(ids: $ids) { ... on CheckRun {
+            id checkSuite { workflowRun { id } } deployment { id environment }
+          } } }'
+          graph="$(jq -n --arg query "$query" --argjson ids "$ids" '{query:$query,variables:{ids:$ids}}' |
+            gh api graphql --input -)"
+          deployment_node="$(jq -er --arg run "$run_node" --arg probe "$probe_node" --arg env "$TARGET_ENV" --argjson ids "$ids" '
+            select((.errors // []) | length == 0) | .data.nodes
+            | select(map(.id) == $ids and all(.[]; .checkSuite.workflowRun.id == $run))
+            | map(select(.deployment != null))
+            | select(length == 1 and .[0].id == $probe and .[0].deployment.environment == $env)
+            | .[0].deployment.id
+          ' <<<"$graph")"
+          deployment_id="$(gh api --method GET "$base/deployments" -f environment="$TARGET_ENV" -F per_page=10 |
+            jq -er --arg node "$deployment_node" --arg env "$TARGET_ENV" '.[0] | select(.node_id == $node and .environment == $env) | .id')"
+          printf 'Verified synthetic run %s, attempt 1, deployment %s.\n' "$GITHUB_RUN_ID" "$deployment_id"
+      - name: Write synthetic evidence
+        if: ${{ !endsWith(inputs.environment, '-missing') }}
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$TARGET_ENV" in
+            *-nonconflict) output='Synthetic unrelated failure' ;;
+            *-conflict) output='Synthetic 409 Conflict: The target resource is in progress state: Updating' ;;
+            *) exit 2 ;;
+          esac
+          jq -n --arg output "$output" \
+            '{schemaVersion:"1.0",outcome:"failed",exitCode:1,resourceType:"application",name:"fixture-app",forced:false,output:$output}' \
+            > "$RUNNER_TEMP/rad-delete-result.json"
+      - name: Upload synthetic evidence
+        if: ${{ !endsWith(inputs.environment, '-missing') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rad-delete-result
+          path: ${{ runner.temp }}/rad-delete-result.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Fail intentionally without running Radius
+        run: exit 1
