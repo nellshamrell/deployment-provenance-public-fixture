@@ -32,6 +32,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          trap 'printf "Provenance assertion failed at: %s\n" "$stage" >&2' ERR
+          stage='exact Actions run'
           test "$GITHUB_RUN_ATTEMPT" = 1
           base="repos/$GITHUB_REPOSITORY"
           run="$(gh api "$base/actions/runs/$GITHUB_RUN_ID")"
@@ -39,16 +41,22 @@ jobs:
             select(.id == $run_id and .repository.full_name == $repo and .event == "workflow_dispatch"
               and .run_attempt == 1 and .path == ".github/workflows/delete-application.yml") | .node_id
           ' <<<"$run")"
+          stage='exact attempt jobs'
           jobs="$(gh api "$base/actions/runs/$GITHUB_RUN_ID/attempts/1/jobs?per_page=30")"
           ids="$(jq -ce 'select(.total_count == (.jobs | length) and .total_count > 0 and .total_count <= 30)
             | [.jobs[].node_id] | select(all(.[]; type == "string" and length > 0) and length == (unique | length))' <<<"$jobs")"
+          stage='running provider job'
           probe_node="$(jq -er '[.jobs[] | select(.status == "in_progress" and
             (.name | endswith("Generate synthetic failure evidence")))] | select(length == 1) | .[0].node_id' <<<"$jobs")"
           query='query($ids: [ID!]!) { nodes(ids: $ids) { ... on CheckRun {
             id checkSuite { workflowRun { id } } deployment { id environment }
           } } }'
+          stage='GraphQL request'
           graph="$(jq -n --arg query "$query" --argjson ids "$ids" '{query:$query,variables:{ids:$ids}}' |
-            gh api graphql --input -)"
+            curl --fail-with-body --silent --show-error --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" --header 'Content-Type: application/json' \
+              --data-binary @- "$GITHUB_API_URL/graphql")"
+          stage='exact check-run deployment link'
           deployment_node="$(jq -er --arg run "$run_node" --arg probe "$probe_node" --arg env "$TARGET_ENV" --argjson ids "$ids" '
             select((.errors // []) | length == 0) | .data.nodes
             | select(map(.id) == $ids and all(.[]; .checkSuite.workflowRun.id == $run))
@@ -56,6 +64,7 @@ jobs:
             | select(length == 1 and .[0].id == $probe and .[0].deployment.environment == $env)
             | .[0].deployment.id
           ' <<<"$graph")"
+          stage='newest REST deployment'
           deployment_id="$(gh api --method GET "$base/deployments" -f environment="$TARGET_ENV" -F per_page=10 |
             jq -er --arg node "$deployment_node" --arg env "$TARGET_ENV" '.[0] | select(.node_id == $node and .environment == $env) | .id')"
           printf 'Verified synthetic run %s, attempt 1, deployment %s.\n' "$GITHUB_RUN_ID" "$deployment_id"

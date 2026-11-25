@@ -9,7 +9,7 @@ on:
         type: choice
         required: true
         options:
-          - force-review-conflict
+          - force-review-v2-conflict
           - force-review-missing
           - force-review-nonconflict
           - force-app-conflict
